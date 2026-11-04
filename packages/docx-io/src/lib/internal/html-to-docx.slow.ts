@@ -526,6 +526,102 @@ describe('htmlToDocxBlob', () => {
       expect(paragraphs[1]).toContain('<w:ind w:left="360"/>');
       expect(paragraphs[3]).toContain('<w:ind w:left="360"/>');
     });
+
+    const getListRows = async (html: string) => {
+      const zip = await loadZipFromBlob(await htmlToDocxBlob(html));
+      const docXml = await zip.file('word/document.xml')!.async('string');
+
+      return (docXml.match(/<w:p(?:\s[^>]*)?>[\s\S]*?<\/w:p>/g) ?? []).map(
+        (paragraph) => [
+          paragraph.includes('<w:drawing>')
+            ? 'image'
+            : getTextRuns(paragraph)
+                .map(([text]) => text)
+                .join(''),
+          paragraph.includes('<w:numPr>')
+            ? 'marker'
+            : paragraph.match(/<w:ind [^>]*\/>/)?.[0],
+        ]
+      );
+    };
+
+    it('keeps line breaks and inline elements in the list item paragraph', async () => {
+      expect(
+        await getListRows('<ul><li>Line one<br>Press <kbd>Ctrl</kbd></li></ul>')
+      ).toEqual([['Line onePress Ctrl', 'marker']]);
+    });
+
+    it('starts a paragraph for each block after a list item paragraph', async () => {
+      expect(
+        await getListRows(
+          '<ul><li><p>A</p><blockquote>B</blockquote><pre>C</pre></li></ul>'
+        )
+      ).toEqual([
+        ['A', 'marker'],
+        ['B', '<w:ind w:left="360"/>'],
+        ['C', '<w:ind w:left="360"/>'],
+      ]);
+    });
+
+    it('marks a list item that starts with a figure and indents the rest', async () => {
+      expect(
+        await getListRows(
+          `<ul><li><div>${figure}</div><p>After</p></li><li><p>Before</p><div>${figure}</div></li></ul>`
+        )
+      ).toEqual([
+        ['image', 'marker'],
+        ['Caption', '<w:ind w:left="360"/>'],
+        ['After', '<w:ind w:left="360"/>'],
+        ['Before', 'marker'],
+        ['image', '<w:ind w:left="360"/>'],
+        ['Caption', '<w:ind w:left="360"/>'],
+      ]);
+    });
+
+    it('keeps a Plate static image beside its void spacer in a list item', async () => {
+      const plateImage = `<div data-slate-node="element" data-slate-void="true">${figure}<span data-slate-spacer="true"><span data-slate-zero-width="z">﻿<br></span></span></div>`;
+
+      expect(await getListRows(`<ol><li>${plateImage}</li></ol>`)).toEqual([
+        ['image', 'marker'],
+        ['Caption', '<w:ind w:left="360"/>'],
+      ]);
+    });
+
+    it.each([
+      ['an image it cannot export', '<img src="https://example.com/a.png">'],
+      [
+        'a table',
+        '<table><tr><td>Cell</td></tr></table><figcaption>Caption</figcaption>',
+      ],
+      ['no image, table or caption', '<p>Quote</p>'],
+    ])('keeps the number of a list item whose figure starts with %s', async (_, part) => {
+      const html = `<ol><li>One</li><li><figure>${part}</figure></li><li>Three</li></ol>`;
+      const zip = await loadZipFromBlob(await htmlToDocxBlob(html));
+      const docXml = await zip.file('word/document.xml')!.async('string');
+
+      expect(docXml.match(/<w:numPr>/g)).toHaveLength(3);
+    });
+
+    it('fits an image that starts a list item to the item text width', async () => {
+      const html = `<ul><li><figure><img src="${image}" style="width: 600px; height: 240px"></figure></li></ul>`;
+      const zip = await loadZipFromBlob(await htmlToDocxBlob(html));
+      const docXml = await zip.file('word/document.xml')!.async('string');
+
+      expect(docXml).toContain('<w:numPr>');
+      expect(docXml).toContain('cx="5257800" cy="2103120"');
+    });
+
+    it('keeps a table inside a figure in a list item', async () => {
+      const html =
+        '<ul><li><p>Before</p><figure><table><tr><td>Cell</td></tr></table><figcaption>Caption</figcaption></figure></li></ul>';
+      const zip = await loadZipFromBlob(await htmlToDocxBlob(html));
+      const docXml = await zip.file('word/document.xml')!.async('string');
+
+      expect(docXml.match(/<w:tbl>[\s\S]*?<\/w:tbl>/g)).toEqual([
+        expect.stringContaining('Cell'),
+      ]);
+      expect(docXml).toContain('Caption');
+    });
   });
 
   describe('links', () => {
